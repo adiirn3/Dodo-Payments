@@ -1,1 +1,58 @@
+1.DOCKERFILE
+
+FROM python:3.10-slim AS base
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+FROM base AS runtime
+COPY . .
+CMD ["python", "app.py"]
+
+
+2 .Terraform Code
+
+resource "aws_ecs_cluster" "main" {
+  name = "backend-service-cluster"
+}
+
+resource "aws_rds_instance" "db" {
+  engine            = "postgres"
+  instance_class    = "db.t3.micro"
+  allocated_storage = 20
+  username          = var.db_username
+  password          = var.db_password
+}
+
+
+3.CI-CD.YAMLname: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Log in to AWS ECR
+        run: aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account_id>.dkr.ecr.us-east-1.amazonaws.com
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t backend-service .
+          docker tag backend-service:latest <account_id>.dkr.ecr.us-east-1.amazonaws.com/backend-service:latest
+          docker push <account_id>.dkr.ecr.us-east-1.amazonaws.com/backend-service:latest
+
+      - name: Deploy to ECS
+        run: terraform apply -auto-approve
+
+
+
+
+
 
