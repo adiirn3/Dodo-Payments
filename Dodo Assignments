@@ -2,30 +2,130 @@
 
 FROM python:3.10-slim AS base
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
 
-FROM base AS runtime
+# Set a non-root user to run the application
+RUN useradd -m appuser
+USER appuser
+
+# Copy and install dependencies
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
 COPY . .
+
+# Specify runtime command
 CMD ["python", "app.py"]
 
 
 2 .Terraform Code
+variable "db_username" {}
+variable "db_password" {}
 
+# ECS Cluster
 resource "aws_ecs_cluster" "main" {
   name = "backend-service-cluster"
 }
 
+# RDS Instance (PostgreSQL)
 resource "aws_rds_instance" "db" {
-  engine            = "postgres"
-  instance_class    = "db.t3.micro"
-  allocated_storage = 20
-  username          = var.db_username
-  password          = var.db_password
+  engine               = "postgres"
+  instance_class       = "db.t3.micro"
+  allocated_storage    = 20
+  username             = var.db_username
+  password             = var.db_password
+  publicly_accessible  = false
+  multi_az             = true  # High availability
+  storage_encrypted    = true  # Encryption at rest
+  backup_retention_period = 7  # Backups retained for 7 days
+}
+
+# Security Group for RDS
+resource "aws_security_group" "rds" {
+  name        = "rds-sg"
+  description = "Allow access to RDS from ECS tasks"
+
+  ingress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    security_groups = [aws_security_group.ecs_tasks.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Application Load Balancer
+resource "aws_alb" "main" {
+  name            = "backend-alb"
+  security_groups = [aws_security_group.alb_sg.id]
+  subnets         = ["subnet-123456", "subnet-654321"]
+  internal        = false
+}
+
+# ALB Security Group
+resource "aws_security_group" "alb_sg" {
+  name = "alb-sg"
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# IAM Role for ECS Tasks
+resource "aws_iam_role" "ecs_task_role" {
+  name = "ecs-task-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action    = "sts:AssumeRole"
+        Effect    = "Allow"
+        Principal = { Service = "ecs-tasks.amazonaws.com" }
+      }
+    ]
+  })
+}
+
+# Enable CloudTrail for Audit Logging
+resource "aws_cloudtrail" "main" {
+  name           = "backend-audit-trail"
+  s3_bucket_name = aws_s3_bucket.audit_logs.bucket
+  is_multi_region_trail = true
+}
+
+# S3 Bucket for Audit Logs
+resource "aws_s3_bucket" "audit_logs" {
+  bucket = "backend-audit-logs"
+  versioning {
+    enabled = true
+  }
+  server_side_encryption_configuration {
+    rule {
+      apply_server_side_encryption_by_default {
+        sse_algorithm = "AES256"
+      }
+    }
+  }
+  lifecycle {
+    prevent_destroy = true  # Prevent accidental deletion
+  }
 }
 
 
+
 3.CI-CD.YAMLname: CI/CD Pipeline
+
+
+name: CI/CD Pipeline
 
 on:
   push:
@@ -33,25 +133,35 @@ on:
       - main
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
+      # Checkout the code
       - name: Checkout code
         uses: actions/checkout@v3
 
+      # Image vulnerability scanning
+      - name: Scan Docker Image
+        run: |
+          docker build -t backend-service .
+          docker scan backend-service --file Dockerfile
+
+      # Authenticate and push to AWS ECR
       - name: Log in to AWS ECR
         run: aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account_id>.dkr.ecr.us-east-1.amazonaws.com
 
       - name: Build and push Docker image
         run: |
-          docker build -t backend-service .
           docker tag backend-service:latest <account_id>.dkr.ecr.us-east-1.amazonaws.com/backend-service:latest
           docker push <account_id>.dkr.ecr.us-east-1.amazonaws.com/backend-service:latest
 
+      # Deploy to ECS
       - name: Deploy to ECS
         run: terraform apply -auto-approve
 
-
+      # Audit logging notification
+      - name: Notify Audit Logs
+        run: echo "CI/CD pipeline completed. Logs are stored in CloudTrail and S3 bucket."
 
 
 
