@@ -18,7 +18,11 @@ COPY . .
 CMD ["python", "app.py"]
 
 
-2 .Terraform Code
+2 ..TERRAFORM CODE
+
+
+
+
 variable "db_username" {}
 variable "db_password" {}
 
